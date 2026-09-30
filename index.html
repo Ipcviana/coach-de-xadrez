@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Coach de Xadrez — Lacunas de Aprendizagem</title>
+<style>
+:root{font-family:Inter,system-ui,Arial,sans-serif;color:#18202a;background:#f4f5f7}
+*{box-sizing:border-box}body{margin:0}.wrap{max-width:1180px;margin:auto;padding:26px}
+h1{margin:0 0 5px}.sub{margin:0 0 20px;color:#5e6874}
+.grid{display:grid;grid-template-columns:minmax(320px,540px) 1fr;gap:22px}
+.card{background:#fff;border:1px solid #dfe3e8;border-radius:16px;padding:18px;box-shadow:0 3px 14px #0000000b}
+textarea{width:100%;min-height:220px;border:1px solid #cfd5dc;border-radius:10px;padding:12px;font:13px ui-monospace,monospace}
+button,.btn{border:0;border-radius:10px;padding:10px 14px;background:#202938;color:#fff;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block}
+button.secondary,.btn.secondary{background:#eef1f5;color:#202938}.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+.status{padding:10px 12px;background:#f0f3f6;border-radius:10px;color:#46515d;margin-top:11px}
+progress{width:100%}.small{font-size:13px;color:#68727e}
+.board{display:grid;grid-template-columns:repeat(8,1fr);width:min(100%,520px);aspect-ratio:1;margin:12px auto;border:3px solid #222}
+.sq{display:grid;place-items:center;font-size:clamp(25px,6vw,54px);user-select:none;border:0;border-radius:0;padding:0}.light{background:#eee}.dark{background:#769656}
+.selected{outline:4px solid #eab308;outline-offset:-4px}.last{box-shadow:inset 0 0 0 4px #60a5fa}
+.metric{display:grid;grid-template-columns:1fr auto;gap:8px;padding:8px 0;border-bottom:1px solid #eee}
+.good{color:#18794e}.warn{color:#a15c00}.bad{color:#b42318}
+.pill{display:inline-block;padding:4px 8px;border-radius:99px;background:#eef2ff;margin:2px;font-size:12px}
+.exercise{border:1px solid #e0e4e9;border-radius:12px;padding:13px;margin:10px 0}
+.exercise h4{margin:0 0 6px}.exercise p{margin:6px 0;line-height:1.45}
+.tag{display:inline-block;padding:3px 7px;background:#f0f3f6;border-radius:8px;font-size:12px;margin:2px}
+@media(max-width:820px){.grid{grid-template-columns:1fr}.wrap{padding:15px}}
+</style>
+</head>
+<body>
+<main class="wrap">
+<h1>♟️ Coach de Xadrez — Lacuna de Aprendizagem</h1>
+<p class="sub">Cole uma partida encerrada. O robô procura posições críticas e transforma os erros em exercícios direcionados.</p>
+
+<div class="grid">
+<section class="card">
+<h2>Partida</h2>
+<textarea id="pgn" placeholder='Cole o PGN de uma partida já terminada...'></textarea>
+<div class="row" style="margin-top:10px">
+<button id="load">Carregar</button>
+<button id="analyze" disabled>Analisar e criar exercícios</button>
+</div>
+<div id="status" class="status">Aguardando PGN.</div>
+<div class="small" style="margin-top:8px">Dica: publique o projeto em Vercel/GitHub Pages ou rode um servidor local. Não abra o HTML diretamente pelo duplo clique.</div>
+<div id="progressWrap" style="display:none;margin-top:10px">
+<div id="progressText" class="small">Preparando...</div><progress id="progress" max="100" value="0"></progress>
+</div>
+<div id="board" class="board"></div>
+</section>
+
+<section class="card">
+<h2>Diagnóstico</h2>
+<div id="diagnosis"><p class="small">O robô vai identificar os principais momentos de aprendizagem da partida.</p></div>
+<h2>Exercícios</h2>
+<div id="exercises"><p class="small">Nenhum exercício criado ainda.</p></div>
+</section>
+</div>
+</main>
+
+<script type="module">
+import { Chess } from "https://cdn.jsdelivr.net/npm/chess.js@1.4.0/+esm";
+
+const $=id=>document.getElementById(id);
+const piece={p:"♟",n:"♞",b:"♝",r:"♜",q:"♛",k:"♚",P:"♙",N:"♘",B:"♗",R:"♖",Q:"♕",K:"♔"};
+let game=null, history=[], engine=null, engineReady=false, current=null, queue=[];
+
+function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+
+function render(){
+ const b=$("board");b.innerHTML="";if(!game)return;
+ const bd=game.board();
+ for(let r=0;r<8;r++)for(let c=0;c<8;c++){
+  const sq=String.fromCharCode(97+c)+(8-r), el=document.createElement("div");
+  el.className="sq "+(((r+c)%2)?"dark":"light");
+  const p=bd[r][c];el.textContent=p?piece[p.color==="w"?p.type.toUpperCase():p.type]:"";b.appendChild(el);
+ }
+}
+
+$("load").onclick=()=>{
+ try{
+  game=new Chess();game.loadPgn($("pgn").value.trim());history=game.history({verbose:true});render();
+  $("status").textContent=`Partida carregada: ${history.length} meios-lances. Clique em "Analisar e criar exercícios".`;
+  $("analyze").disabled=false;
+ }catch(e){$("status").textContent="Erro no PGN: "+e.message;$("analyze").disabled=true;}
+};
+
+function startEngine(){
+ if(engine)return;
+ engine=new Worker("./stockfish-worker.js");
+ engine.onmessage=e=>{
+  const line=typeof e.data==="string"?e.data:"";
+  if(line==="uciok"){engine.postMessage("isready");return}
+  if(line==="readyok"){engineReady=true;runQueue();return}
+  if(line.startsWith("info")&&current){
+   const m=line.match(/\bscore (cp|mate) (-?\d+)/);
+   if(m) current.lastScore={type:m[1],value:Number(m[2])};
+   const pv=line.match(/\bpv ([a-h][1-8][a-h][1-8][qrbn]?(?:\s+[a-h][1-8][a-h][1-8][qrbn]?){0,7})/);
+   if(pv) current.pv=pv[1];
+  }
+  if(line.startsWith("bestmove ")&&current){
+   const best=line.split(/\s+/)[1];current.resolve({best,score:current.lastScore,pv:current.pv});
+   current=null;runQueue();
+  }
+ };
+ engine.onerror=(e)=>{
+  console.error("Stockfish Worker error:", e);
+  $("status").textContent="O Stockfish não conseguiu iniciar. Verifique se o projeto foi aberto por um servidor web (Vercel/GitHub Pages/localhost), e não diretamente como arquivo .html.";
+  $("progressWrap").style.display="none";
+  $("analyze").disabled=false;
+};
+ engine.postMessage("uci");
+}
+function runQueue(){
+ if(current||!engineReady||!queue.length)return;
+ current=queue.shift();current.lastScore=null;current.pv="";
+ engine.postMessage("position fen "+current.fen);
+ engine.postMessage("go depth "+current.depth);
+}
+function ask(fen,depth=14){return new Promise(resolve=>{queue.push({fen,depth,resolve});runQueue()})}
+
+function uciToSan(fen,uci){
+ try{const g=new Chess(fen);return g.move({from:uci.slice(0,2),to:uci.slice(2,4),promotion:uci[4]}).san}catch{return uci}
+}
+function cp(score){if(!score)return null;if(score.type==="mate")return score.value>0?10000:-10000;return score.value}
+function classify(loss, played, best){
+ if(loss>=250)return {type:"Erro grave",cls:"bad"};
+ if(loss>=100)return {type:"Erro",cls:"bad"};
+ if(loss>=50)return {type:"Imprecisão",cls:"warn"};
+ return null;
+}
+function themeFor(fen,played,best,pv){
+ // Heuristics: the final classification is based on engine loss;
+ // tactical labels are suggestions for study, not claims of a formal puzzle tag.
+ const g=new Chess(fen);
+ let themes=[];
+ const san=played.san;
+ if(san.includes("??")||san.includes("?"))themes.push("erro tático");
+ if(san.includes("x"))themes.push("captura");
+ if(san.includes("+"))themes.push("xeque");
+ if(best.includes("x"))themes.push("tática/captura");
+ if(pv && /[a-h][1-8][a-h][1-8]/.test(pv))themes.push("cálculo de variantes");
+ return [...new Set(themes)];
+}
+function lichessUrl(fen){
+ return "https://lichess.org/analysis/"+encodeURIComponent(fen).replace(/%2F/g,"/").replace(/%20/g,"_");
+}
+function puzzleThemeUrl(theme){
+ const map={
+  "mate":"https://lichess.org/training/themes/mate",
+  "fork":"https://lichess.org/training/themes/fork",
+  "pin":"https://lichess.org/training/themes/pin",
+  "skewer":"https://lichess.org/training/themes/skewer",
+  "discoveredAttack":"https://lichess.org/training/themes/discoveredAttack",
+  "doubleAttack":"https://lichess.org/training/themes/doubleAttack",
+  "hangingPiece":"https://lichess.org/training/themes/hangingPiece",
+  "defensiveMove":"https://lichess.org/training/themes/defensiveMove"
+ };
+ return map[theme]||"https://lichess.org/training";
+}
+
+async function analyze(){
+ $("analyze").disabled=true;$("progressWrap").style.display="block";$("progress").value=0;
+ startEngine();let wait=0;while(!engineReady&&wait<15000){await new Promise(r=>setTimeout(r,100));wait+=100}
+ if(!engineReady){$("analyze").disabled=false;return}
+
+ const replay=new Chess(), rows=[];
+ const n=Math.min(history.length,100);
+ for(let i=0;i<n;i++){
+  const fen=replay.fen(), played=history[i];
+  const result=await ask(fen,14);
+  const bestSan=uciToSan(fen,result.best);
+  const bestGame=new Chess(fen);
+  let bestScore=cp(result.score);
+  // We use the engine score from the best line. Then play the user's move
+  // and obtain the post-move evaluation from the opponent's perspective.
+  let playedResult;
+  try{replay.move(played)}catch{continue}
+  playedResult=await ask(replay.fen(),12);
+  let post=cp(playedResult.score);
+  // Engine score is from side-to-move perspective. Convert both to White perspective.
+  const whiteBest=(played.color==="w")?bestScore:-bestScore;
+  const whitePost=(replay.turn()==="w")?post:-post;
+  const loss=Math.max(0,Math.round((whiteBest??0)-(whitePost??0)));
+  const cls=classify(loss,played,bestSan);
+  if(cls){
+   rows.push({ply:i+1,moveNumber:Math.floor(i/2)+1,color:played.color,played:played.san,best:bestSan,loss,cls,fen,themes:themeFor(fen,played,bestSan,result.pv||"")});
+  }
+  $("progress").value=Math.round((i+1)/n*100);$("progressText").textContent=`Analisando ${i+1}/${n}`;
+ }
+ rows.sort((a,b)=>b.loss-a.loss);
+ $("progressWrap").style.display="none";$("analyze").disabled=false;
+
+ const counts={};
+ rows.forEach(r=>counts[r.cls.type]=(counts[r.cls.type]||0)+1);
+ const themes=rows.flatMap(r=>r.themes);
+ const freq={};themes.forEach(t=>freq[t]=(freq[t]||0)+1);
+ $("diagnosis").innerHTML=`
+  <div class="metric"><span>Posições analisadas</span><b>${n}</b></div>
+  <div class="metric"><span>Momentos críticos</span><b class="${rows.length?'warn':'good'}">${rows.length}</b></div>
+  <div class="metric"><span>Erros graves</span><b>${counts["Erro grave"]||0}</b></div>
+  <div class="metric"><span>Erros</span><b>${counts["Erro"]||0}</b></div>
+  <div class="metric"><span>Imprecisões</span><b>${counts["Imprecisão"]||0}</b></div>
+  <p><b>Lacunas sugeridas:</b> ${(Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0,5).map(x=>`<span class="tag">${esc(x[0])} (${x[1]})</span>`).join(" "))||"nenhuma detectada nesta profundidade."}</p>`;
+
+ if(!rows.length){$("exercises").innerHTML="<p class='good'>Não foram encontrados lances com perda suficiente na análise inicial.</p>";return}
+
+ $("exercises").innerHTML=rows.slice(0,12).map((r,i)=>`
+ <article class="exercise">
+  <h4>Exercício ${i+1} — ${esc(r.cls.type)}</h4>
+  <p><b>Na partida:</b> ${r.moveNumber}${r.color==="w"?".":"..."} ${esc(r.played)} → <b>melhor:</b> ${esc(r.best)}</p>
+  <p><b>Perda estimada:</b> ${r.loss/100} peões. <span class="tag">${r.color==="w"?"Brancas":"Pretas"}</span>
+  ${r.themes.map(t=>`<span class="tag">${esc(t)}</span>`).join("")}</p>
+  <div class="row">
+   <a class="btn" target="_blank" rel="noopener" href="${lichessUrl(r.fen)}">Treinar esta posição no Lichess</a>
+   <a class="btn secondary" target="_blank" rel="noopener" href="${puzzleThemeUrl("hangingPiece")}">Puzzles Lichess</a>
+  </div>
+  <p class="small">Método: tente encontrar o lance antes de consultar a análise. O link abre a posição no tabuleiro de análise do Lichess.</p>
+ </article>`).join("");
+ $("status").textContent=`Diagnóstico concluído: ${rows.length} momentos críticos encontrados.`;
+}
+$("analyze").onclick=analyze;
+</script>
+</body>
+</html>
